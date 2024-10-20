@@ -3,6 +3,7 @@ import ballerina/sql;
 import ballerina/time;
 import ballerinax/h2.driver as _;
 import ballerinax/java.jdbc;
+import ballerina/io;
 
 final jdbc:Client dbClient = check new (url = "jdbc:h2:file:./database/loandatabase", user = "test", password = "test");
 
@@ -15,74 +16,88 @@ public function main() returns error? {
 
 function extract() returns [LoanRequest[], LoanApproval[]]|error {
     log:printInfo("BEGIN: extract data from the sftp server");
-    // Hint: Use io ballerina library and read the csv files
 
-    string loanRequestFile = "loan_request_2024_03_22.csv";
-    LoanRequest[] loanRequests;
+    string loanRequestFile = "resources/loan_request_2024_03_22.csv";
+    string loanApprovalsFile = "resources/approved_loans_2024_03_22.csv";
 
-    string loanApprovalsFile = "approved_loans_2024_03_22.csv";    
-    LoanApproval[] loanApprovals;
+    // Reads the previously-saved CSV file as a record[].
+    LoanRequest[] readLoanRequests = check io:fileReadCsv(loanRequestFile);
+    LoanApproval[] readLoanApprovals = check io:fileReadCsv(loanApprovalsFile);
+    io:println(readLoanRequests);
+    io:println(readLoanApprovals);
 
     log:printInfo("END: extract data from the sftp server");
-    return [loanRequests, loanApprovals];
+    return [readLoanRequests, readLoanApprovals];
 }
 
 function transform(LoanRequest[] loanRequests, LoanApproval[] loanApprovals)
     returns [Loan[], BranchPerformance[], RegionPerformance[]] {
     log:printInfo("START: transform data");
 
-    // Get the unique approved loan requests by joining two csv files
-    // Create an array of Loan records
-    // Hint: User ballerina integrated queries and transformLoanRequest function
-    Loan[] approvedLoans;
+    // Join LoanRequest and LoanApproval arrays to get the approved loans
+    Loan[] approvedLoans = from LoanRequest lr in loanRequests
+                           join LoanApproval la in loanApprovals
+                           on lr.loanRequestId equals la.loanRequestId
+                           select transformLoanRequest(lr, la);
 
+    // Group the approvedLoans by branch and loan type to create BranchPerformance records
     BranchPerformance[] branchPerformance = from var {branch, loanType, grantedAmount, interest}
-        in approvedLoans
-        group by branch, loanType
-        select {
-            id: generateId(),
-            branch,
-            loanType,
-            totalGrants: sum(grantedAmount),
-            totalInterest: sum(interest),
-            date: todayString()
-        };
+                                            in approvedLoans
+                                            group by branch, loanType
+                                            select {
+                                                id: generateId(),
+                                                branch,
+                                                loanType,
+                                                totalGrants: sum(grantedAmount),
+                                                totalInterest: sum(interest),
+                                                date: todayString()
+                                            };
 
-    // Group the `approvedLoans` by region, loanType, date, dayOfWeek
-    // Hint: User ballerina integrated queries and use `sum` function when needed
-    RegionPerformance[] regionPerformance;
+    // Group the approvedLoans by region, loanType, date, dayOfWeek to create RegionPerformance records
+    RegionPerformance[] regionPerformance = from var {region, loanType, date, dayOfWeek, grantedAmount, interest}
+                                            in approvedLoans
+                                            group by region, loanType, date, dayOfWeek
+                                            select {
+                                                id: generateId(),
+                                                region,
+                                                loanType,
+                                                date,
+                                                dayOfWeek,
+                                                totalGrants: sum(grantedAmount),
+                                                totalInterest: sum(interest)
+                                            };
 
     log:printInfo("END: transform data");
     return [approvedLoans, branchPerformance, regionPerformance];
 }
 
 function transformLoanRequest(LoanRequest loanRequest, LoanApproval loanApproval) returns Loan {
-    log:printInfo(string `START: transform loan request: ${loanRequest.loanRequestId}`);
+    //log:printInfo(string START: transform loan request: ${loanRequest.loanRequestId});
 
     var {loanRequestId, amount, loanType, datetime, period, branch, status} = loanRequest;
     var {grantedAmount, interest, period: approvedPeriod} = loanApproval;
 
-    // date time related operations
+    // Date time related operations
     time:Date date = fromUtcStringToDate(datetime, USA_UTC_OFFSET_IN_SECONDS);
     string dateString = fromDateToString(date);
     DayOfWeek dayOfWeek = getDayOfWeek(date);
 
-    // Hint: Categorize branch by region
-    string region;
+    // Categorize branch by region
+    string region = getRegion(branch);
 
-    // Hint: Catergorization of loans by amount and type
-    LoanCatergotyByAmount loanCatergoryByAmount;
+    // Categorization of loans by amount and type
+    LoanCatergotyByAmount loanCatergoryByAmount = getLoanCategoryByAmount(amount, loanType);
 
-    // Hint: Calculate total interest
-    decimal totalInterest;
+    // Calculate total interest
+    decimal totalInterest = interest;
 
-    // Hint: Get the loan status
-    LoanStatus loanStatus;
+    // Get the loan status
+    LoanStatus loanStatus = getLoanStatus(status);
 
-    // Hint: Get the loan type
-    LoanType 'type;
+    // Get the loan type
+    LoanType 'type = getLoanType(loanType);
 
-    log:printInfo(string `END: transform loan request: ${loanRequest.loanRequestId}`);
+    //log:printInfo(string END: transform loan request: ${loanRequest.loanRequestId});
     return {
         loanRequestId,
         amount,
@@ -115,7 +130,7 @@ function loadRegionPerformance(RegionPerformance[] data) returns error? {
                 (id, region, loanType, date, dayOfWeek, totalGrants, totalInterest) 
                 VALUES (${rp.id}, ${rp.region}, ${rp.loanType}, 
                 ${rp.date}, ${rp.dayOfWeek}, ${rp.totalGrants}, ${rp.totalInterest})`;
-   _ = check dbClient->batchExecute(insertQueries);
+    _ = check dbClient->batchExecute(insertQueries);
 }
 
 function loadBranchPerformance(BranchPerformance[] data) returns error? {
